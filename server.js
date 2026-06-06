@@ -10,6 +10,17 @@ const wss = new WebSocket.Server({ server });
 
 let rooms = {};
 
+function generateRoomId() {
+    return Math.random().toString(36).substring(2, 7).toUpperCase();
+}
+
+function findAvailableRoom() {
+    for (let id in rooms) {
+        if (rooms[id].players.length === 1) return id;
+    }
+    return null;
+}
+
 wss.on('connection', function(ws) {
     console.log('Client connected');
 
@@ -17,42 +28,33 @@ wss.on('connection', function(ws) {
         const data = JSON.parse(message.toString());
 
         if (data.type === 'join') {
-            const roomId = data.room;
-            if (!rooms[roomId]) {
-                rooms[roomId] = { players: [], emoji: {} };
+            let roomId = findAvailableRoom();
+            if (!roomId) {
+                roomId = generateRoomId();
+                rooms[roomId] = { players: [], board: Array(9).fill(null) };
             }
             const room = rooms[roomId];
+            room.players.push(ws);
+            ws.room = roomId;
+            ws.playerNum = room.players.length;
 
-            if (room.players.length < 2) {
-                room.players.push(ws);
-                ws.room = roomId;
-                const playerNum = room.players.length;
-                ws.playerNum = playerNum;
-                room.emoji[playerNum] = data.emoji;
+            ws.send(JSON.stringify({
+                type: 'joined',
+                player: ws.playerNum,
+                room: roomId
+            }));
 
-                ws.send(JSON.stringify({
-                    type: 'joined',
-                    player: playerNum,
-                    emoji: data.emoji
-                }));
-
-                if (room.players.length === 2) {
-                    room.players.forEach(p => {
-                        p.send(JSON.stringify({
-                            type: 'start',
-                            emoji1: room.emoji[1],
-                            emoji2: room.emoji[2]
-                        }));
-                    });
-                }
-            } else {
-                ws.send(JSON.stringify({ type: 'full' }));
+            if (room.players.length === 2) {
+                room.players.forEach(p => {
+                    p.send(JSON.stringify({ type: 'start', room: roomId }));
+                });
             }
         }
 
         if (data.type === 'move') {
             const room = rooms[ws.room];
             if (room) {
+                room.board[data.index] = ws.playerNum;
                 room.players.forEach(p => {
                     p.send(JSON.stringify({
                         type: 'move',
@@ -63,30 +65,42 @@ wss.on('connection', function(ws) {
             }
         }
 
-        if (data.type === 'restart') {
+        if (data.type === 'chat') {
             const room = rooms[ws.room];
             if (room) {
                 room.players.forEach(p => {
-                    p.send(JSON.stringify({ type: 'restart' }));
+                    p.send(JSON.stringify({
+                        type: 'chat',
+                        player: ws.playerNum,
+                        msg: data.msg
+                    }));
                 });
             }
+        }
+
+        if (data.type === 'leave') {
+            handleLeave(ws);
         }
     });
 
     ws.on('close', function() {
-        const room = rooms[ws.room];
-        if (room) {
-            room.players = room.players.filter(p => p !== ws);
-            room.players.forEach(p => {
-                p.send(JSON.stringify({ type: 'opponent_left' }));
-            });
-            if (room.players.length === 0) {
-                delete rooms[ws.room];
-            }
-        }
+        handleLeave(ws);
         console.log('Client disconnected');
     });
 });
+
+function handleLeave(ws) {
+    const room = rooms[ws.room];
+    if (room) {
+        room.players = room.players.filter(p => p !== ws);
+        room.players.forEach(p => {
+            p.send(JSON.stringify({ type: 'opponent_left' }));
+        });
+        if (room.players.length === 0) {
+            delete rooms[ws.room];
+        }
+    }
+}
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {

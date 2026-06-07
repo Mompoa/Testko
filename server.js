@@ -31,7 +31,11 @@ wss.on('connection', function(ws) {
             let roomId = findAvailableRoom();
             if (!roomId) {
                 roomId = generateRoomId();
-                rooms[roomId] = { players: [], board: Array(9).fill(null) };
+                rooms[roomId] = {
+                    players: [],
+                    board: Array(9).fill(null),
+                    currentTurn: 1  // Player 1 goes first
+                };
             }
             const room = rooms[roomId];
             room.players.push(ws);
@@ -53,16 +57,25 @@ wss.on('connection', function(ws) {
 
         if (data.type === 'move') {
             const room = rooms[ws.room];
-            if (room) {
-                room.board[data.index] = ws.playerNum;
-                room.players.forEach(p => {
-                    p.send(JSON.stringify({
-                        type: 'move',
-                        index: data.index,
-                        player: ws.playerNum
-                    }));
-                });
-            }
+            if (!room) return;
+
+            // ✅ Reject if not your turn
+            if (room.currentTurn !== ws.playerNum) return;
+
+            // ✅ Reject if cell already taken or invalid
+            const idx = data.index;
+            if (idx < 0 || idx > 8 || room.board[idx] !== null) return;
+
+            room.board[idx] = ws.playerNum;
+            room.currentTurn = ws.playerNum === 1 ? 2 : 1; // switch turn
+
+            room.players.forEach(p => {
+                p.send(JSON.stringify({
+                    type: 'move',
+                    index: idx,
+                    player: ws.playerNum
+                }));
+            });
         }
 
         if (data.type === 'chat') {
@@ -90,6 +103,8 @@ wss.on('connection', function(ws) {
 });
 
 function handleLeave(ws) {
+    if (ws.hasLeft) return; // ✅ prevent double-fire
+    ws.hasLeft = true;
     const room = rooms[ws.room];
     if (room) {
         room.players = room.players.filter(p => p !== ws);

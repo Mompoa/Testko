@@ -34,40 +34,47 @@ wss.on('connection', function(ws) {
                 rooms[roomId] = {
                     players: [],
                     board: Array(9).fill(null),
-                    currentTurn: 1  // Player 1 goes first
+                    currentTurn: 1
                 };
             }
             const room = rooms[roomId];
             room.players.push(ws);
             ws.room = roomId;
             ws.playerNum = room.players.length;
+            ws.playerName = data.name || ('Player ' + ws.playerNum);
 
             ws.send(JSON.stringify({
                 type: 'joined',
                 player: ws.playerNum,
-                room: roomId
+                room: roomId,
+                name: ws.playerName
             }));
 
             if (room.players.length === 2) {
-                room.players.forEach(p => {
-                    p.send(JSON.stringify({ type: 'start', room: roomId }));
-                });
+                const p1 = room.players[0];
+                const p2 = room.players[1];
+                p1.send(JSON.stringify({
+                    type: 'start',
+                    room: roomId,
+                    opponentName: p2.playerName
+                }));
+                p2.send(JSON.stringify({
+                    type: 'start',
+                    room: roomId,
+                    opponentName: p1.playerName
+                }));
             }
         }
 
         if (data.type === 'move') {
             const room = rooms[ws.room];
             if (!room) return;
-
-            // ✅ Reject if not your turn
             if (room.currentTurn !== ws.playerNum) return;
-
-            // ✅ Reject if cell already taken or invalid
             const idx = data.index;
             if (idx < 0 || idx > 8 || room.board[idx] !== null) return;
 
             room.board[idx] = ws.playerNum;
-            room.currentTurn = ws.playerNum === 1 ? 2 : 1; // switch turn
+            room.currentTurn = ws.playerNum === 1 ? 2 : 1;
 
             room.players.forEach(p => {
                 p.send(JSON.stringify({
@@ -85,6 +92,7 @@ wss.on('connection', function(ws) {
                     p.send(JSON.stringify({
                         type: 'chat',
                         player: ws.playerNum,
+                        name: ws.playerName,
                         msg: data.msg
                     }));
                 });
@@ -103,7 +111,7 @@ wss.on('connection', function(ws) {
 });
 
 function handleLeave(ws) {
-    if (ws.hasLeft) return; // ✅ prevent double-fire
+    if (ws.hasLeft) return;
     ws.hasLeft = true;
     const room = rooms[ws.room];
     if (room) {

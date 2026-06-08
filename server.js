@@ -3,129 +3,207 @@ const http = require('http');
 
 const server = http.createServer((req, res) => {
     res.writeHead(200);
-    res.end('TicTacToe Server Running!');
+    res.end('Nebulous Server Running!');
 });
 
 const wss = new WebSocket.Server({ server });
 
-let rooms = {};
+// World config
+const WORLD_WIDTH = 3000;
+const WORLD_HEIGHT = 3000;
+const FOOD_COUNT = 300;
+const TICK_RATE = 50; // ms
+const MIN_RADIUS = 20;
+const MAX_SPEED = 5;
+const EAT_RATIO = 1.15; // must be 15% bigger to eat
 
-function generateRoomId() {
-    return Math.random().toString(36).substring(2, 7).toUpperCase();
+let players = {};
+let foods = [];
+let nextId = 1;
+
+// --- Food generation ---
+function randomColor() {
+    const colors = ['#FF4444','#FF8800','#FFDD00','#44FF44','#00CCFF','#AA44FF','#FF44AA','#44FFDD'];
+    return colors[Math.floor(Math.random() * colors.length)];
 }
 
-function findAvailableRoom() {
-    for (let id in rooms) {
-        if (rooms[id].players.length === 1) return id;
+function spawnFood() {
+    return {
+        id: nextId++,
+        x: Math.random() * WORLD_WIDTH,
+        y: Math.random() * WORLD_HEIGHT,
+        r: 6 + Math.random() * 6,
+        color: randomColor()
+    };
+}
+
+for (let i = 0; i < FOOD_COUNT; i++) {
+    foods.push(spawnFood());
+}
+
+// --- Utility ---
+function dist(a, b) {
+    return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+}
+
+function broadcast(data) {
+    const msg = JSON.stringify(data);
+    wss.clients.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+    });
+}
+
+function sendTo(ws, data) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+}
+
+// --- Game loop ---
+setInterval(() => {
+    const playerList = Object.values(players);
+
+    // Move players toward their target
+    for (const p of playerList) {
+        if (p.targetX == null) continue;
+
+        const dx = p.targetX - p.x;
+        const dy = p.targetY - p.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < 2) continue;
+
+        // Speed decreases as blob grows
+        const speed = Math.max(1.5, MAX_SPEED - p.r * 0.04);
+        const move = Math.min(speed, d);
+        p.x += (dx / d) * move;
+        p.y += (dy / d) * move;
+
+        // Clamp to world
+        p.x = Math.max(p.r, Math.min(WORLD_WIDTH - p.r, p.x));
+        p.y = Math.max(p.r, Math.min(WORLD_HEIGHT - p.r, p.y));
     }
-    return null;
-}
 
+    // Check food eating
+    const eatenFoodIds = [];
+    for (const p of playerList) {
+        for (let i = foods.length - 1; i >= 0; i--) {
+            const f = foods[i];
+            if (dist(p, f) < p.r) {
+                p.r += f.r * 0.3;
+                eatenFoodIds.push(f.id);
+                foods.splice(i, 1);
+            }
+        }
+    }
+
+    // Respawn eaten food
+    while (foods.length < FOOD_COUNT) {
+        foods.push(spawnFood());
+    }
+
+    // Check player eating
+    const eatenPlayerIds = [];
+    for (let i = 0; i < playerList.length; i++) {
+        for (let j = 0; j < playerList.length; j++) {
+            if (i === j) continue;
+            const big = playerList[i];
+            const small = playerList[j];
+            if (big.r > small.r * EAT_RATIO && dist(big, small) < big.r - small.r * 0.5) {
+                // big eats small
+                big.r += small.r * 0.5;
+                big.score += small.score + 10;
+                eatenPlayerIds.push(small.id);
+                sendTo(small.ws, { type: 'eaten', by: big.name });
+                // respawn small
+                small.x = Math.random() * WORLD_WIDTH;
+                small.y = Math.random() * WORLD_HEIGHT;
+                small.r = MIN_RADIUS;
+                small.score = 0;
+            }
+        }
+    }
+
+    // Build leaderboard (top 5)
+    const leaderboard = playerList
+        .sort((a, b) => b.r - a.r)
+        .slice(0, 5)
+        .map(p => ({ name: p.name, r: Math.round(p.r), score: p.score }));
+
+    // Broadcast game state
+    broadcast({
+        type: 'state',
+        players: playerList.map(p => ({
+            id: p.id,
+            name: p.name,
+            x: Math.round(p.x),
+            y: Math.round(p.y),
+            r: Math.round(p.r),
+            color: p.color,
+            score: p.score
+        })),
+        foods: foods.map(f => ({ id: f.id, x: Math.round(f.x), y: Math.round(f.y), r: Math.round(f.r), color: f.color })),
+        leaderboard
+    });
+
+}, TICK_RATE);
+
+// --- Connection handling ---
 wss.on('connection', function(ws) {
     console.log('Client connected');
 
     ws.on('message', function(message) {
-        const data = JSON.parse(message.toString());
+        let data;
+        try { data = JSON.parse(message.toString()); } catch(e) { return; }
 
         if (data.type === 'join') {
-            let roomId = findAvailableRoom();
-            if (!roomId) {
-                roomId = generateRoomId();
-                rooms[roomId] = {
-                    players: [],
-                    board: Array(9).fill(null),
-                    currentTurn: 1
-                };
-            }
-            const room = rooms[roomId];
-            room.players.push(ws);
-            ws.room = roomId;
-            ws.playerNum = room.players.length;
-            ws.playerName = data.name || ('Player ' + ws.playerNum);
+            const id = nextId++;
+            const name = (data.name || 'Player').replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 16) || 'Player';
+            const color = randomColor();
+            const player = {
+                id,
+                ws,
+                name,
+                color,
+                x: Math.random() * WORLD_WIDTH,
+                y: Math.random() * WORLD_HEIGHT,
+                r: MIN_RADIUS,
+                score: 0,
+                targetX: null,
+                targetY: null
+            };
+            players[id] = player;
+            ws.playerId = id;
 
-            ws.send(JSON.stringify({
+            sendTo(ws, {
                 type: 'joined',
-                player: ws.playerNum,
-                room: roomId,
-                name: ws.playerName
-            }));
+                id,
+                name,
+                color,
+                worldWidth: WORLD_WIDTH,
+                worldHeight: WORLD_HEIGHT
+            });
 
-            if (room.players.length === 2) {
-                const p1 = room.players[0];
-                const p2 = room.players[1];
-                p1.send(JSON.stringify({
-                    type: 'start',
-                    room: roomId,
-                    opponentName: p2.playerName
-                }));
-                p2.send(JSON.stringify({
-                    type: 'start',
-                    room: roomId,
-                    opponentName: p1.playerName
-                }));
-            }
+            console.log(`${name} joined (id=${id})`);
         }
 
         if (data.type === 'move') {
-            const room = rooms[ws.room];
-            if (!room) return;
-            if (room.currentTurn !== ws.playerNum) return;
-            const idx = data.index;
-            if (idx < 0 || idx > 8 || room.board[idx] !== null) return;
-
-            room.board[idx] = ws.playerNum;
-            room.currentTurn = ws.playerNum === 1 ? 2 : 1;
-
-            room.players.forEach(p => {
-                p.send(JSON.stringify({
-                    type: 'move',
-                    index: idx,
-                    player: ws.playerNum
-                }));
-            });
-        }
-
-        if (data.type === 'chat') {
-            const room = rooms[ws.room];
-            if (room) {
-                room.players.forEach(p => {
-                    p.send(JSON.stringify({
-                        type: 'chat',
-                        player: ws.playerNum,
-                        name: ws.playerName,
-                        msg: data.msg
-                    }));
-                });
-            }
-        }
-
-        if (data.type === 'leave') {
-            handleLeave(ws);
+            const p = players[ws.playerId];
+            if (!p) return;
+            // data.x, data.y = world coords target
+            p.targetX = Math.max(0, Math.min(WORLD_WIDTH, data.x));
+            p.targetY = Math.max(0, Math.min(WORLD_HEIGHT, data.y));
         }
     });
 
     ws.on('close', function() {
-        handleLeave(ws);
-        console.log('Client disconnected');
+        const id = ws.playerId;
+        if (id && players[id]) {
+            console.log(`${players[id].name} left`);
+            delete players[id];
+        }
     });
 });
 
-function handleLeave(ws) {
-    if (ws.hasLeft) return;
-    ws.hasLeft = true;
-    const room = rooms[ws.room];
-    if (room) {
-        room.players = room.players.filter(p => p !== ws);
-        room.players.forEach(p => {
-            p.send(JSON.stringify({ type: 'opponent_left' }));
-        });
-        if (room.players.length === 0) {
-            delete rooms[ws.room];
-        }
-    }
-}
-
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Nebulous server running on port ${PORT}`);
 });
+        

@@ -133,12 +133,6 @@ setInterval(() => {
         e.vy *= 0.8;
         e.x = Math.max(e.r, Math.min(WORLD_WIDTH  - e.r, e.x));
         e.y = Math.max(e.r, Math.min(WORLD_HEIGHT - e.r, e.y));
-        e.life -= TICK_RATE;
-        if (e.life <= 0) {
-            // Convert to food
-            foods.push({ id: nextId++, x: e.x, y: e.y, r: 5, color: e.color });
-            ejected.splice(i, 1);
-        }
     }
 
     // --- Food eating (main blobs + split blobs) ---
@@ -159,7 +153,7 @@ setInterval(() => {
             if (e.ownerId === ownerId) continue;
             if (dist(p, e) < p.r) {
                 const owner = p.ownerId ? players[p.ownerId] : p;
-                if (owner) owner.r += e.r * 0.5;
+                if (owner) owner.r += e.r;
                 ejected.splice(i, 1);
             }
         }
@@ -305,7 +299,7 @@ wss.on('connection', function(ws) {
         // Eject mass — W button equivalent
         if (data.type === 'eject') {
             const p = players[ws.playerId];
-            if (!p || p.r < 25) return;
+            if (!p || p.r < 22) return;
             const dx = (data.tx - p.x) || 1;
             const dy = (data.ty - p.y) || 0;
             const d  = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -318,16 +312,18 @@ wss.on('connection', function(ws) {
                 r: 5,
                 color: p.color,
                 vx: (dx / d) * speed,
-                vy: (dy / d) * speed,
-                life: 3000
+                vy: (dy / d) * speed
+                // no life — stays until eaten
             });
             p.r = Math.max(MIN_RADIUS, p.r - 2);
         }
 
-        // Split blob
+        // Split blob — min r=20, max 5 blobs total
         if (data.type === 'split') {
             const p = players[ws.playerId];
-            if (!p || p.r < MIN_RADIUS * 2) return;
+            const myBlobCount = Object.values(blobs).filter(b => b.ownerId === p.id).length;
+            if (!p || p.r < MIN_RADIUS) return;
+            if (myBlobCount >= 4) return; // main blob + 4 splits = 5 total
             const dx = (data.tx - p.x) || 1;
             const dy = (data.ty - p.y) || 0;
             const d  = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -362,4 +358,4 @@ wss.on('connection', function(ws) {
 
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => console.log(`Nebulous server on port ${PORT}`));
-    
+                                
